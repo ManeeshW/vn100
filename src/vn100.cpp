@@ -242,12 +242,12 @@ void vn100::parse_vn100_packet(void* userData, Packet& p, size_t index) {
     double decl_deg = self->mag_declination * 180.0 / PI;
     double adjusted_yaw_deg = ypr_deg[0] - decl_deg;
 
-    std::cout << "Original YPR (deg): " << ypr_deg[0] << ", " << ypr_deg[1] << ", " << ypr_deg[2] << std::endl;
-    std::cout << "Mag Declination (deg): " << decl_deg << std::endl;
-    std::cout << "Adjusted Yaw (deg): " << adjusted_yaw_deg << std::endl;
-    std::cout << "Angular Rate: " << ang_rate[0] << ", " << ang_rate[1] << ", " << ang_rate[2] << std::endl;
-    std::cout << "Acceleration: " << accel[0] << ", " << accel[1] << ", " << accel[2] << std::endl;
-    std::cout << "Rotation Matrix R_ni:\n" << R_ni << std::endl;
+    // std::cout << "Original YPR (deg): " << ypr_deg[0] << ", " << ypr_deg[1] << ", " << ypr_deg[2] << std::endl;
+    // std::cout << "Mag Declination (deg): " << decl_deg << std::endl;
+    // std::cout << "Adjusted Yaw (deg): " << adjusted_yaw_deg << std::endl;
+    // std::cout << "Angular Rate: " << ang_rate[0] << ", " << ang_rate[1] << ", " << ang_rate[2] << std::endl;
+    // std::cout << "Acceleration: " << accel[0] << ", " << accel[1] << ", " << accel[2] << std::endl;
+    // std::cout << "Rotation Matrix R_ni:\n" << R_ni << std::endl;
 
     {
         std::lock_guard<std::mutex> lock(self->data_mutex);
@@ -266,11 +266,11 @@ void vn100::parse_vn100_packet(void* userData, Packet& p, size_t index) {
     duration<double> elapsed = current_time - start_time;
 
     // Debug print to see progress
-    std::cout << "Debug: Received packet #" << packet_count << ", Elapsed time since start: " << elapsed.count() << " seconds" << std::endl;
+    //std::cout << "Debug: Received packet #" << packet_count << ", Elapsed time since start: " << elapsed.count() << " seconds" << std::endl;
 
     if (elapsed.count() >= 0.5) {  // Reduced threshold to 0.5 seconds to show frequency sooner
         double frequency = packet_count / elapsed.count();
-        std::cout << "Data flow frequency: " << frequency << " Hz (packets per second)" << std::endl;
+        //std::cout << "Data flow frequency: " << frequency << " Hz (packets per second)" << std::endl;
         packet_count = 0;
         start_time = current_time;
     }
