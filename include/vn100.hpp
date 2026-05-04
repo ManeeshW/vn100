@@ -5,12 +5,15 @@
 #include <iostream>
 #include <string>
 #include <mutex>
+#include <optional>
 
 #include "vn/sensors.h"
 #include "vn/thread.h"
 #include "vn/types.h"
 #include "vn/util.h"
 #include "vn/vector.h"
+
+#include <zenoh.hxx>
 
 using namespace vn::math;
 using namespace vn::sensors;
@@ -33,6 +36,8 @@ public:
     std::string port;
     int baud_rate;
     int frequency;
+    std::string zenoh_topic;
+    int zenoh_publish_rate;
 
 private:
     void config_vn100_message(const int divider);
@@ -50,6 +55,10 @@ private:
     vec4f latest_quat;
     bool has_data = false;
     std::mutex data_mutex;
+
+    std::optional<zenoh::Session> z_session;
+    std::optional<zenoh::Publisher> z_publisher;
+    int z_packet_counter = 0;
 };
 
 #endif

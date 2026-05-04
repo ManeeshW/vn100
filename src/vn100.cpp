@@ -7,6 +7,7 @@
 #include <cmath>
 #include <iostream>
 #include <chrono>
+#include <cstdio>
 
 using namespace Eigen;
 using namespace std::chrono;
@@ -27,7 +28,7 @@ std::string trim(const std::string& s) {
     return rtrim(ltrim(s));
 }
 
-vn100::vn100() : is_open(false), has_data(false) {
+vn100::vn100() : is_open(false), has_data(false), z_packet_counter(0) {
     load_config("");
 }
 
@@ -56,6 +57,8 @@ void vn100::load_config(const std::string& config_path) {
     port_number = 2;
     on = true;
     frequency = 200;
+    zenoh_topic = "fdcl/imu";
+    zenoh_publish_rate = 200;
     double mag_deg = 0.0;
 
     bool config_loaded = false;
@@ -86,6 +89,10 @@ void vn100::load_config(const std::string& config_path) {
                         on = (std::stoi(val) != 0);
                     } else if (key == "IMU.frequency") {
                         frequency = std::stoi(val);
+                    } else if (key == "IMU.zenoh_topic") {
+                        zenoh_topic = val;
+                    } else if (key == "IMU.zenoh_publish_rate") {
+                        zenoh_publish_rate = std::stoi(val);
                     }
                 } catch (const std::exception& e) {
                     std::cerr << "Error parsing config line: " << line << " - " << e.what() << std::endl;
@@ -100,12 +107,20 @@ void vn100::load_config(const std::string& config_path) {
 
     mag_declination = mag_deg * PI / 180.0;
 
-    std::cout << "IMU Config loaded - Port: " << port 
-              << ", Baud: " << baud_rate 
-              << ", Port Num: " << port_number 
+    if (zenoh_publish_rate > frequency) {
+        std::cerr << "Warning: zenoh_publish_rate (" << zenoh_publish_rate
+                  << ") > frequency (" << frequency << "), clamping to frequency." << std::endl;
+        zenoh_publish_rate = frequency;
+    }
+
+    std::cout << "IMU Config loaded - Port: " << port
+              << ", Baud: " << baud_rate
+              << ", Port Num: " << port_number
               << ", Frequency: " << frequency
-              << ", Mag Declination: " << mag_deg << " deg (rad: " << mag_declination << ")" 
-              << ", Enabled: " << (on ? "true" : "false") << std::endl;
+              << ", Mag Declination: " << mag_deg << " deg (rad: " << mag_declination << ")"
+              << ", Enabled: " << (on ? "true" : "false")
+              << ", Zenoh Topic: " << zenoh_topic
+              << ", Zenoh Publish Rate: " << zenoh_publish_rate << " Hz" << std::endl;
 
     if (config_loaded) {
         std::cout << "Config file was successfully loaded and applied." << std::endl;
@@ -124,6 +139,20 @@ void vn100::open(const std::string& p, int b) {
     std::string model_num = vs.readModelNumber();
     std::cout << "IMU: connected to " << model_num << std::endl;
     is_open = true;
+
+    std::cout << "IMU: initializing Zenoh session on topic '" << zenoh_topic << "' at "
+              << zenoh_publish_rate << " Hz .." << std::endl;
+    try {
+        z_session.emplace(zenoh::Session::open(zenoh::Config::create_default()));
+        z_publisher.emplace(z_session->declare_publisher(zenoh_topic));
+        z_packet_counter = 0;
+        std::cout << "IMU: Zenoh publisher ready." << std::endl;
+    } catch (const std::exception& e) {
+        std::cerr << "IMU: Zenoh init failed: " << e.what()
+                  << " - publishing disabled." << std::endl;
+        z_publisher.reset();
+        z_session.reset();
+    }
 
     std::cout << "IMU: setting up binary output register .." << std::endl;
     vs.writeAsyncDataOutputType(VNOFF);  // disable ASCII output
@@ -144,6 +173,15 @@ void vn100::open() {
 void vn100::close() {
     std::cout << "IMU: closing sensor .." << std::endl;
     vs.unregisterAsyncPacketReceivedHandler();
+
+    if (z_publisher.has_value()) {
+        z_publisher.reset();
+        std::cout << "IMU: Zenoh publisher closed." << std::endl;
+    }
+    if (z_session.has_value()) {
+        z_session.reset();
+        std::cout << "IMU: Zenoh session closed." << std::endl;
+    }
 
     int divider = 0;
     vn::protocol::uart::AsyncMode port_mode;
@@ -250,6 +288,35 @@ void vn100::parse_vn100_packet(void* userData, Packet& p, size_t index) {
         self->latest_quat = quat;
         self->latest_accel = accel;
         self->has_data = true;
+    }
+
+    if (self->z_publisher.has_value()) {
+        int skip = (self->frequency > 0 && self->zenoh_publish_rate > 0)
+                   ? (self->frequency / self->zenoh_publish_rate) : 1;
+        if (skip < 1) skip = 1;
+
+        self->z_packet_counter++;
+        if (self->z_packet_counter >= skip) {
+            self->z_packet_counter = 0;
+
+            auto ts = duration_cast<duration<double>>(
+                system_clock::now().time_since_epoch()).count();
+
+            char buf[512];
+            std::snprintf(buf, sizeof(buf),
+                "{\"timestamp\":%.6f,"
+                "\"ypr_deg\":[%.4f,%.4f,%.4f],"
+                "\"quat\":[%.6f,%.6f,%.6f,%.6f],"
+                "\"ang_rate\":[%.6f,%.6f,%.6f],"
+                "\"accel\":[%.6f,%.6f,%.6f]}",
+                ts,
+                ypr_deg[0], ypr_deg[1], ypr_deg[2],
+                quat[0], quat[1], quat[2], quat[3],
+                ang_rate[0], ang_rate[1], ang_rate[2],
+                accel[0], accel[1], accel[2]);
+
+            self->z_publisher->put(zenoh::Bytes(buf));
+        }
     }
 
     static int packet_count = 0;

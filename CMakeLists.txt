@@ -10,6 +10,10 @@ find_package(Eigen3 REQUIRED)
 set(PYBIND11_FINDPYTHON ON)
 find_package(pybind11 REQUIRED)
 
+list(APPEND CMAKE_PREFIX_PATH "/usr/local")
+find_package(zenohc REQUIRED)
+find_package(zenohcxx REQUIRED)
+
 # Include directories
 include_directories(include)
 # VectorNav library path
@@ -44,7 +48,7 @@ set(VN_SOURCES
 
 # Add executable
 add_executable(vn100_sample src/main.cpp src/vn100.cpp ${VN_SOURCES})
-target_link_libraries(vn100_sample PRIVATE Eigen3::Eigen)
+target_link_libraries(vn100_sample PRIVATE Eigen3::Eigen zenohcxx::zenohc)
 if(UNIX)
     target_link_libraries(vn100_sample PRIVATE pthread)
 endif()
@@ -52,7 +56,7 @@ target_compile_options(vn100_sample PRIVATE -Wall -O0 -Wno-class-memaccess -Wno-
 
 # Add Python bindings module
 pybind11_add_module(vn100 MODULE src/bindings.cpp src/vn100.cpp ${VN_SOURCES})
-target_link_libraries(vn100 PRIVATE Eigen3::Eigen)
+target_link_libraries(vn100 PRIVATE Eigen3::Eigen zenohcxx::zenohc)
 if(UNIX)
     target_link_libraries(vn100 PRIVATE pthread)
 endif()
