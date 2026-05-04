@@ -12,8 +12,6 @@ find_package(pybind11 REQUIRED)
 
 # Include directories
 include_directories(include)
-include_directories(${EIGEN3_INCLUDE_DIRS})
-
 # VectorNav library path
 set(VECTORNAV_PATH "${PROJECT_SOURCE_DIR}/vectornav/cpp")
 
@@ -46,6 +44,7 @@ set(VN_SOURCES
 
 # Add executable
 add_executable(vn100_sample src/main.cpp src/vn100.cpp ${VN_SOURCES})
+target_link_libraries(vn100_sample PRIVATE Eigen3::Eigen)
 if(UNIX)
     target_link_libraries(vn100_sample PRIVATE pthread)
 endif()
@@ -53,9 +52,16 @@ target_compile_options(vn100_sample PRIVATE -Wall -O0 -Wno-class-memaccess -Wno-
 
 # Add Python bindings module
 pybind11_add_module(vn100 MODULE src/bindings.cpp src/vn100.cpp ${VN_SOURCES})
+target_link_libraries(vn100 PRIVATE Eigen3::Eigen)
 if(UNIX)
     target_link_libraries(vn100 PRIVATE pthread)
 endif()
 target_compile_options(vn100 PRIVATE -Wall -O0 -Wno-class-memaccess -Wno-catch-value)
 
 install(TARGETS vn100 LIBRARY DESTINATION .)
+
+add_custom_target(copy_config ALL
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        ${CMAKE_SOURCE_DIR}/config.cfg ${CMAKE_BINARY_DIR}/config.cfg
+    COMMENT "Copying config.cfg to build directory"
+)

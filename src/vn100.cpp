@@ -3,6 +3,7 @@
 #include <Eigen/Dense>
 #include <fstream>
 #include <sstream>
+#include <iomanip>
 #include <cmath>
 #include <iostream>
 #include <chrono>
@@ -242,13 +243,6 @@ void vn100::parse_vn100_packet(void* userData, Packet& p, size_t index) {
     double decl_deg = self->mag_declination * 180.0 / PI;
     double adjusted_yaw_deg = ypr_deg[0] - decl_deg;
 
-    // std::cout << "Original YPR (deg): " << ypr_deg[0] << ", " << ypr_deg[1] << ", " << ypr_deg[2] << std::endl;
-    // std::cout << "Mag Declination (deg): " << decl_deg << std::endl;
-    // std::cout << "Adjusted Yaw (deg): " << adjusted_yaw_deg << std::endl;
-    // std::cout << "Angular Rate: " << ang_rate[0] << ", " << ang_rate[1] << ", " << ang_rate[2] << std::endl;
-    // std::cout << "Acceleration: " << accel[0] << ", " << accel[1] << ", " << accel[2] << std::endl;
-    // std::cout << "Rotation Matrix R_ni:\n" << R_ni << std::endl;
-
     {
         std::lock_guard<std::mutex> lock(self->data_mutex);
         self->latest_ypr_deg = ypr_deg;
@@ -258,19 +252,26 @@ void vn100::parse_vn100_packet(void* userData, Packet& p, size_t index) {
         self->has_data = true;
     }
 
-    // Calculate and show print frequency (data flow rate)
     static int packet_count = 0;
     static steady_clock::time_point start_time = steady_clock::now();
     packet_count++;
     auto current_time = steady_clock::now();
     duration<double> elapsed = current_time - start_time;
 
-    // Debug print to see progress
-    //std::cout << "Debug: Received packet #" << packet_count << ", Elapsed time since start: " << elapsed.count() << " seconds" << std::endl;
-
-    if (elapsed.count() >= 0.5) {  // Reduced threshold to 0.5 seconds to show frequency sooner
-        double frequency = packet_count / elapsed.count();
-        //std::cout << "Data flow frequency: " << frequency << " Hz (packets per second)" << std::endl;
+    if (elapsed.count() >= 0.1) {
+        double hz = packet_count / elapsed.count();
+        static bool first_print = true;
+        if (!first_print)
+            std::cout << "\033[5A";  // move cursor up 5 lines to overwrite
+        std::cout << std::fixed
+                  << "\033[2K--- IMU @ " << std::setprecision(1) << hz << " Hz ---\n"
+                  << std::setprecision(3)
+                  << "\033[2K  YPR (deg) : " << ypr_deg[0] << "  " << ypr_deg[1] << "  " << ypr_deg[2] << "\n"
+                  << "\033[2K  Quat      : " << quat[0] << "  " << quat[1] << "  " << quat[2] << "  " << quat[3] << "\n"
+                  << "\033[2K  AngRate   : " << ang_rate[0] << "  " << ang_rate[1] << "  " << ang_rate[2] << "\n"
+                  << "\033[2K  Accel     : " << accel[0] << "  " << accel[1] << "  " << accel[2] << "\n";
+        std::cout.flush();
+        first_print = false;
         packet_count = 0;
         start_time = current_time;
     }

@@ -2,10 +2,10 @@
 #include "vn100.hpp"
 #include <iostream>
 
-int main() {
-    // Use empty string for defaults, or provide path like "config.cfg"
+int main(int argc, char* argv[]) {
+    std::string config_path = (argc > 1) ? argv[1] : "config.cfg";
     vn100 imu;
-    imu.load_config("config.cfg");
+    imu.load_config(config_path);
     
     if (!imu.enabled()) {
         std::cerr << "IMU is disabled in config." << std::endl;
