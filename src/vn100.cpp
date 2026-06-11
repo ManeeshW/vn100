@@ -60,6 +60,13 @@ void vn100::load_config(const std::string& config_path) {
     zenoh_topic = "fdcl/imu";
     zenoh_publish_rate = 200;
     double mag_deg = 0.0;
+    use_butterworth = false;
+    gyro_butter_order = 2;
+    gyro_butter_cutoff = 30.0;
+    accel_butter_order = 2;
+    accel_butter_cutoff = 30.0;
+    publish_filtered_imu = false;
+    filtered_imu_topic = "fdcl/imu_filtered";
 
     bool config_loaded = false;
 
@@ -93,6 +100,20 @@ void vn100::load_config(const std::string& config_path) {
                         zenoh_topic = val;
                     } else if (key == "IMU.zenoh_publish_rate") {
                         zenoh_publish_rate = std::stoi(val);
+                    } else if (key == "IMU.use_butterworth") {
+                        use_butterworth = (std::stoi(val) != 0);
+                    } else if (key == "IMU.gyro_butter_order") {
+                        gyro_butter_order = std::stoi(val);
+                    } else if (key == "IMU.gyro_butter_cutoff") {
+                        gyro_butter_cutoff = std::stod(val);
+                    } else if (key == "IMU.accel_butter_order") {
+                        accel_butter_order = std::stoi(val);
+                    } else if (key == "IMU.accel_butter_cutoff") {
+                        accel_butter_cutoff = std::stod(val);
+                    } else if (key == "IMU.publish_filtered_imu") {
+                        publish_filtered_imu = (std::stoi(val) != 0);
+                    } else if (key == "IMU.filtered_imu_topic") {
+                        filtered_imu_topic = val;
                     }
                 } catch (const std::exception& e) {
                     std::cerr << "Error parsing config line: " << line << " - " << e.what() << std::endl;
@@ -120,7 +141,12 @@ void vn100::load_config(const std::string& config_path) {
               << ", Mag Declination: " << mag_deg << " deg (rad: " << mag_declination << ")"
               << ", Enabled: " << (on ? "true" : "false")
               << ", Zenoh Topic: " << zenoh_topic
-              << ", Zenoh Publish Rate: " << zenoh_publish_rate << " Hz" << std::endl;
+              << ", Zenoh Publish Rate: " << zenoh_publish_rate << " Hz"
+              << ", Butterworth: " << (use_butterworth ? "enabled" : "disabled")
+              << ", Gyro [order=" << gyro_butter_order << " cutoff=" << gyro_butter_cutoff << " Hz]"
+              << ", Accel [order=" << accel_butter_order << " cutoff=" << accel_butter_cutoff << " Hz]"
+              << ", Publish Filtered: " << (publish_filtered_imu ? filtered_imu_topic : "no")
+              << std::endl;
 
     if (config_loaded) {
         std::cout << "Config file was successfully loaded and applied." << std::endl;
@@ -140,6 +166,13 @@ void vn100::open(const std::string& p, int b) {
     std::cout << "IMU: connected to " << model_num << std::endl;
     is_open = true;
 
+    // Initialize Butterworth filters
+    if (use_butterworth) {
+        gyro_filter  = ButterworthFilter(gyro_butter_order,  gyro_butter_cutoff,  static_cast<double>(frequency), 3);
+        accel_filter = ButterworthFilter(accel_butter_order, accel_butter_cutoff, static_cast<double>(frequency), 3);
+        std::cout << "IMU: Butterworth filters initialized." << std::endl;
+    }
+
     std::cout << "IMU: initializing Zenoh session on topic '" << zenoh_topic << "' at "
               << zenoh_publish_rate << " Hz .." << std::endl;
     try {
@@ -152,6 +185,20 @@ void vn100::open(const std::string& p, int b) {
                   << " - publishing disabled." << std::endl;
         z_publisher.reset();
         z_session.reset();
+    }
+
+    // Initialize filtered IMU publisher if enabled
+    if (publish_filtered_imu) {
+        try {
+            z_filtered_session.emplace(zenoh::Session::open(zenoh::Config::create_default()));
+            z_filtered_publisher.emplace(z_filtered_session->declare_publisher(filtered_imu_topic));
+            std::cout << "IMU: Filtered IMU Zenoh publisher ready on '" << filtered_imu_topic << "'." << std::endl;
+        } catch (const std::exception& e) {
+            std::cerr << "IMU: Filtered Zenoh init failed: " << e.what()
+                      << " - filtered publishing disabled." << std::endl;
+            z_filtered_publisher.reset();
+            z_filtered_session.reset();
+        }
     }
 
     std::cout << "IMU: setting up binary output register .." << std::endl;
@@ -181,6 +228,15 @@ void vn100::close() {
     if (z_session.has_value()) {
         z_session.reset();
         std::cout << "IMU: Zenoh session closed." << std::endl;
+    }
+
+    if (z_filtered_publisher.has_value()) {
+        z_filtered_publisher.reset();
+        std::cout << "IMU: Filtered Zenoh publisher closed." << std::endl;
+    }
+    if (z_filtered_session.has_value()) {
+        z_filtered_session.reset();
+        std::cout << "IMU: Filtered Zenoh session closed." << std::endl;
     }
 
     int divider = 0;
@@ -257,8 +313,17 @@ void vn100::parse_vn100_packet(void* userData, Packet& p, size_t index) {
     YPR_rad(1) = ypr_deg[1] * PI / 180.0;
     YPR_rad(2) = ypr_deg[2] * PI / 180.0;
 
-    Vector3d W_i(ang_rate[0], ang_rate[1], ang_rate[2]);
-    Vector3d a_i(accel[0], accel[1], accel[2]);
+    Eigen::VectorXd W_i(3), a_i(3);
+    W_i << ang_rate[0], ang_rate[1], ang_rate[2];
+    a_i << accel[0], accel[1], accel[2];
+
+    // Apply Butterworth filters if enabled
+    Eigen::VectorXd W_filt = W_i;
+    Eigen::VectorXd a_filt = a_i;
+    if (self->use_butterworth) {
+        W_filt = self->gyro_filter.update(W_i);
+        a_filt = self->accel_filter.update(a_i);
+    }
 
     double cy = cos(YPR_rad(0));
     double sy = sin(YPR_rad(0));
@@ -302,21 +367,46 @@ void vn100::parse_vn100_packet(void* userData, Packet& p, size_t index) {
             auto ts = duration_cast<duration<double>>(
                 system_clock::now().time_since_epoch()).count();
 
-            char buf[512];
+            char buf[768];
             std::snprintf(buf, sizeof(buf),
                 "{\"timestamp\":%.6f,"
                 "\"ypr_deg\":[%.4f,%.4f,%.4f],"
                 "\"quat\":[%.6f,%.6f,%.6f,%.6f],"
                 "\"ang_rate\":[%.6f,%.6f,%.6f],"
-                "\"accel\":[%.6f,%.6f,%.6f]}",
+                "\"accel\":[%.6f,%.6f,%.6f],"
+                "\"ang_rate_filtered\":[%.6f,%.6f,%.6f],"
+                "\"accel_filtered\":[%.6f,%.6f,%.6f]}",
                 ts,
                 ypr_deg[0], ypr_deg[1], ypr_deg[2],
                 quat[0], quat[1], quat[2], quat[3],
                 ang_rate[0], ang_rate[1], ang_rate[2],
-                accel[0], accel[1], accel[2]);
+                accel[0], accel[1], accel[2],
+                W_filt(0), W_filt(1), W_filt(2),
+                a_filt(0), a_filt(1), a_filt(2));
 
             self->z_publisher->put(zenoh::Bytes(buf));
         }
+    }
+
+    // Publish filtered IMU on separate topic if enabled
+    if (self->z_filtered_publisher.has_value()) {
+        auto ts = duration_cast<duration<double>>(
+            system_clock::now().time_since_epoch()).count();
+
+        char fbuf[512];
+        std::snprintf(fbuf, sizeof(fbuf),
+            "{\"timestamp\":%.6f,"
+            "\"ypr_deg\":[%.4f,%.4f,%.4f],"
+            "\"quat\":[%.6f,%.6f,%.6f,%.6f],"
+            "\"ang_rate\":[%.6f,%.6f,%.6f],"
+            "\"accel\":[%.6f,%.6f,%.6f]}",
+            ts,
+            ypr_deg[0], ypr_deg[1], ypr_deg[2],
+            quat[0], quat[1], quat[2], quat[3],
+            W_filt(0), W_filt(1), W_filt(2),
+            a_filt(0), a_filt(1), a_filt(2));
+
+        self->z_filtered_publisher->put(zenoh::Bytes(fbuf));
     }
 
     static int packet_count = 0;

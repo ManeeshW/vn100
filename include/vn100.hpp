@@ -14,6 +14,9 @@
 #include "vn/vector.h"
 
 #include <zenoh.hxx>
+#include <Eigen/Dense>
+
+#include "butterworth.hpp"
 
 using namespace vn::math;
 using namespace vn::sensors;
@@ -56,9 +59,25 @@ private:
     bool has_data = false;
     std::mutex data_mutex;
 
+    // Raw IMU Zenoh publisher
     std::optional<zenoh::Session> z_session;
     std::optional<zenoh::Publisher> z_publisher;
     int z_packet_counter = 0;
+
+    // Butterworth filter settings
+    bool use_butterworth = false;
+    int gyro_butter_order = 2;
+    double gyro_butter_cutoff = 30.0;
+    int accel_butter_order = 2;
+    double accel_butter_cutoff = 30.0;
+    ButterworthFilter gyro_filter;
+    ButterworthFilter accel_filter;
+
+    // Filtered IMU Zenoh publisher (separate topic)
+    bool publish_filtered_imu = false;
+    std::string filtered_imu_topic = "fdcl/imu_filtered";
+    std::optional<zenoh::Session> z_filtered_session;
+    std::optional<zenoh::Publisher> z_filtered_publisher;
 };
 
 #endif
