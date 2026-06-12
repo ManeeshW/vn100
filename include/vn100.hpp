@@ -65,7 +65,7 @@ private:
     int z_packet_counter = 0;
 
     // Butterworth filter settings
-    bool use_butterworth = false;
+    bool use_butterworth = true;
     int gyro_butter_order = 2;
     double gyro_butter_cutoff = 30.0;
     int accel_butter_order = 2;
@@ -74,8 +74,8 @@ private:
     ButterworthFilter accel_filter;
 
     // Filtered IMU Zenoh publisher (separate topic)
-    bool publish_filtered_imu = false;
-    std::string filtered_imu_topic = "fdcl/imu_filtered";
+    bool publish_filtered_imu = true;
+    std::string filtered_imu_topic = "fdcl/rover_imu_filtered";
     std::optional<zenoh::Session> z_filtered_session;
     std::optional<zenoh::Publisher> z_filtered_publisher;
 };

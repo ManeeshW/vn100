@@ -8,6 +8,9 @@
 #include <iostream>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
+#include <cstdint>
+#include <vector>
 
 using namespace Eigen;
 using namespace std::chrono;
@@ -60,13 +63,13 @@ void vn100::load_config(const std::string& config_path) {
     zenoh_topic = "fdcl/imu";
     zenoh_publish_rate = 200;
     double mag_deg = 0.0;
-    use_butterworth = false;
+    use_butterworth = true;
     gyro_butter_order = 2;
     gyro_butter_cutoff = 30.0;
     accel_butter_order = 2;
     accel_butter_cutoff = 30.0;
-    publish_filtered_imu = false;
-    filtered_imu_topic = "fdcl/imu_filtered";
+    publish_filtered_imu = true;
+    filtered_imu_topic = "fdcl/rover_imu_filtered";
 
     bool config_loaded = false;
 
@@ -388,25 +391,24 @@ void vn100::parse_vn100_packet(void* userData, Packet& p, size_t index) {
         }
     }
 
-    // Publish filtered IMU on separate topic if enabled
+    // Publish filtered IMU on separate topic if enabled.
+    // Binary wire format: 10 doubles (80 bytes), little-endian
+    //   [unused(3), ang_rate(3), accel(3), timestamp(1)]
+    // matching ikf_node's parseImu() in zenoh_utils.hpp.
     if (self->z_filtered_publisher.has_value()) {
         auto ts = duration_cast<duration<double>>(
             system_clock::now().time_since_epoch()).count();
 
-        char fbuf[512];
-        std::snprintf(fbuf, sizeof(fbuf),
-            "{\"timestamp\":%.6f,"
-            "\"ypr_deg\":[%.4f,%.4f,%.4f],"
-            "\"quat\":[%.6f,%.6f,%.6f,%.6f],"
-            "\"ang_rate\":[%.6f,%.6f,%.6f],"
-            "\"accel\":[%.6f,%.6f,%.6f]}",
-            ts,
-            ypr_deg[0], ypr_deg[1], ypr_deg[2],
-            quat[0], quat[1], quat[2], quat[3],
-            W_filt(0), W_filt(1), W_filt(2),
-            a_filt(0), a_filt(1), a_filt(2));
+        double vals[10] = {
+            0.0, 0.0, 0.0,                      // unused
+            W_filt(0), W_filt(1), W_filt(2),    // filtered ang_rate
+            a_filt(0), a_filt(1), a_filt(2),    // filtered accel
+            ts                                  // timestamp
+        };
 
-        self->z_filtered_publisher->put(zenoh::Bytes(fbuf));
+        std::vector<uint8_t> fbuf(sizeof(vals));
+        std::memcpy(fbuf.data(), vals, sizeof(vals));
+        self->z_filtered_publisher->put(zenoh::Bytes(std::move(fbuf)));
     }
 
     static int packet_count = 0;
