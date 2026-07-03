@@ -70,6 +70,11 @@ void vn100::load_config(const std::string& config_path) {
     accel_butter_cutoff = 30.0;
     publish_filtered_imu = true;
     filtered_imu_topic = "fdcl/rover_imu_filtered";
+    calibrate_bias = true;
+    calib_duration_sec = 10.0;
+    calib_warmup_sec = 1.0;
+    calib_gyro_motion_thresh = 0.02;
+    calib_accel_motion_thresh = 0.30;
 
     bool config_loaded = false;
 
@@ -117,6 +122,16 @@ void vn100::load_config(const std::string& config_path) {
                         publish_filtered_imu = (std::stoi(val) != 0);
                     } else if (key == "IMU.filtered_imu_topic") {
                         filtered_imu_topic = val;
+                    } else if (key == "IMU.calibrate_bias") {
+                        calibrate_bias = (std::stoi(val) != 0);
+                    } else if (key == "IMU.calib_duration") {
+                        calib_duration_sec = std::stod(val);
+                    } else if (key == "IMU.calib_warmup") {
+                        calib_warmup_sec = std::stod(val);
+                    } else if (key == "IMU.calib_gyro_motion_thresh") {
+                        calib_gyro_motion_thresh = std::stod(val);
+                    } else if (key == "IMU.calib_accel_motion_thresh") {
+                        calib_accel_motion_thresh = std::stod(val);
                     }
                 } catch (const std::exception& e) {
                     std::cerr << "Error parsing config line: " << line << " - " << e.what() << std::endl;
@@ -149,6 +164,8 @@ void vn100::load_config(const std::string& config_path) {
               << ", Gyro [order=" << gyro_butter_order << " cutoff=" << gyro_butter_cutoff << " Hz]"
               << ", Accel [order=" << accel_butter_order << " cutoff=" << accel_butter_cutoff << " Hz]"
               << ", Publish Filtered: " << (publish_filtered_imu ? filtered_imu_topic : "no")
+              << ", Bias Calib: " << (calibrate_bias ? "enabled" : "disabled")
+              << " [warmup=" << calib_warmup_sec << "s duration=" << calib_duration_sec << "s]"
               << std::endl;
 
     if (config_loaded) {
@@ -174,6 +191,22 @@ void vn100::open(const std::string& p, int b) {
         gyro_filter  = ButterworthFilter(gyro_butter_order,  gyro_butter_cutoff,  static_cast<double>(frequency), 3);
         accel_filter = ButterworthFilter(accel_butter_order, accel_butter_cutoff, static_cast<double>(frequency), 3);
         std::cout << "IMU: Butterworth filters initialized." << std::endl;
+    }
+
+    // Initialize startup bias calibration state
+    gyro_sum.setZero();   accel_sum.setZero();
+    gyro_sumsq.setZero(); accel_sumsq.setZero();
+    gyro_bias.setZero();  accel_bias.setZero();
+    calib_count = 0;
+    if (calibrate_bias) {
+        calib_warmup_samples = std::max(0,   static_cast<int>(calib_warmup_sec   * frequency));
+        calib_target_samples = std::max(1,   static_cast<int>(calib_duration_sec * frequency));
+        calib_state = (calib_warmup_samples > 0) ? CalibState::Warmup : CalibState::Collecting;
+        std::cout << "IMU: stationary bias calibration enabled - keep the IMU still for the first "
+                  << (calib_warmup_sec + calib_duration_sec) << " s." << std::endl;
+    } else {
+        calib_state = CalibState::Done;  // bias stays zero
+        std::cout << "IMU: bias calibration disabled." << std::endl;
     }
 
     std::cout << "IMU: initializing Zenoh session on topic '" << zenoh_topic << "' at "
@@ -319,6 +352,78 @@ void vn100::parse_vn100_packet(void* userData, Packet& p, size_t index) {
     Eigen::VectorXd W_i(3), a_i(3);
     W_i << ang_rate[0], ang_rate[1], ang_rate[2];
     a_i << accel[0], accel[1], accel[2];
+
+    // ---- Startup stationary bias calibration ----
+    // The IMU is assumed at rest at startup. Discard a warmup window, then
+    // average ang_rate and accel to estimate the constant bias and remove it.
+    if (self->calib_state != CalibState::Done) {
+        if (self->calib_state == CalibState::Warmup) {
+            if (++self->calib_count >= self->calib_warmup_samples) {
+                self->calib_state = CalibState::Collecting;
+                self->calib_count = 0;
+                self->gyro_sum.setZero();   self->accel_sum.setZero();
+                self->gyro_sumsq.setZero(); self->accel_sumsq.setZero();
+                std::cout << "\nIMU: warmup complete, collecting bias samples "
+                             "(keep IMU stationary)..." << std::endl;
+            }
+        } else {  // Collecting
+            self->gyro_sum    += W_i;
+            self->accel_sum   += a_i;
+            self->gyro_sumsq  += W_i.cwiseProduct(W_i);
+            self->accel_sumsq += a_i.cwiseProduct(a_i);
+            if (++self->calib_count >= self->calib_target_samples) {
+                const double n = static_cast<double>(self->calib_count);
+                self->gyro_bias  = self->gyro_sum  / n;
+                self->accel_bias = self->accel_sum / n;
+                Eigen::Vector3d gyro_std =
+                    ((self->gyro_sumsq  / n) - self->gyro_bias.cwiseProduct(self->gyro_bias))
+                        .cwiseMax(0.0).cwiseSqrt();
+                Eigen::Vector3d accel_std =
+                    ((self->accel_sumsq / n) - self->accel_bias.cwiseProduct(self->accel_bias))
+                        .cwiseMax(0.0).cwiseSqrt();
+                bool moved = (gyro_std.maxCoeff()  > self->calib_gyro_motion_thresh) ||
+                             (accel_std.maxCoeff() > self->calib_accel_motion_thresh);
+                self->calib_state = CalibState::Done;
+
+                // Reset filters so the bias step change doesn't create a transient.
+                if (self->use_butterworth) {
+                    self->gyro_filter  = ButterworthFilter(
+                        self->gyro_butter_order,  self->gyro_butter_cutoff,
+                        static_cast<double>(self->frequency), 3);
+                    self->accel_filter = ButterworthFilter(
+                        self->accel_butter_order, self->accel_butter_cutoff,
+                        static_cast<double>(self->frequency), 3);
+                }
+
+                std::cout << std::fixed << std::setprecision(6)
+                          << "\nIMU: bias calibration complete (" << self->calib_count << " samples)\n"
+                          << "  gyro  bias [rad/s] : " << self->gyro_bias(0)  << "  "
+                          << self->gyro_bias(1)  << "  " << self->gyro_bias(2)
+                          << "   (std " << gyro_std(0) << " " << gyro_std(1) << " " << gyro_std(2) << ")\n"
+                          << "  accel bias [m/s^2] : " << self->accel_bias(0) << "  "
+                          << self->accel_bias(1) << "  " << self->accel_bias(2)
+                          << "   (std " << accel_std(0) << " " << accel_std(1) << " " << accel_std(2) << ")"
+                          << std::endl;
+                if (moved) {
+                    std::cerr << "IMU: WARNING - motion detected during calibration "
+                                 "(std above threshold). Bias may be inaccurate; "
+                                 "keep the IMU stationary and restart to recalibrate."
+                              << std::endl;
+                }
+            }
+        }
+        // bias is zero until calibration completes (robot is stationary anyway)
+    }
+
+    // Remove estimated bias so published values are zero-mean at rest.
+    W_i -= self->gyro_bias;
+    a_i -= self->accel_bias;
+    ang_rate[0] = static_cast<float>(W_i(0));
+    ang_rate[1] = static_cast<float>(W_i(1));
+    ang_rate[2] = static_cast<float>(W_i(2));
+    accel[0] = static_cast<float>(a_i(0));
+    accel[1] = static_cast<float>(a_i(1));
+    accel[2] = static_cast<float>(a_i(2));
 
     // Apply Butterworth filters if enabled
     Eigen::VectorXd W_filt = W_i;
