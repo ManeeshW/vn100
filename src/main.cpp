@@ -3,7 +3,7 @@
 #include <iostream>
 
 int main(int argc, char* argv[]) {
-    std::string config_path = (argc > 1) ? argv[1] : "config.cfg";
+    std::string config_path = (argc > 1) ? argv[1] : "../config.cfg";
     vn100 imu;
     imu.load_config(config_path);
     
