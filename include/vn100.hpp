@@ -91,6 +91,17 @@ private:
     double calib_gyro_motion_thresh  = 0.02;  // rad/s, per-axis std limit
     double calib_accel_motion_thresh = 0.30;  // m/s^2, per-axis std limit
 
+    // Continuous adaptive bias tracking (zero-velocity update).
+    // After the startup estimate, a stationarity detector watches the
+    // short-window variance of gyro/accel. Whenever the IMU is at rest the
+    // true output is known (gyro = 0, gravity-compensated accel = 0), so the
+    // raw reading is the bias; the bias is then updated with a slow EMA.
+    // While moving, the bias is frozen. This tracks the real MEMS bias drift
+    // (temperature / in-run instability) that a one-shot startup average
+    // cannot, so calibration stays valid after the IMU rotates and moves.
+    bool   calib_adaptive = true;
+    double calib_adaptive_tau = 5.0;    // s, EMA time constant while stationary
+
     enum class CalibState { Warmup, Collecting, Done };
     CalibState calib_state = CalibState::Warmup;
     int calib_warmup_samples = 0;
@@ -102,6 +113,20 @@ private:
     Eigen::Vector3d accel_sumsq = Eigen::Vector3d::Zero();
     Eigen::Vector3d gyro_bias   = Eigen::Vector3d::Zero();
     Eigen::Vector3d accel_bias  = Eigen::Vector3d::Zero();
+
+    // Adaptive tracking state.
+    void update_adaptive_bias(const Eigen::Vector3d& gyro_raw,
+                              const Eigen::Vector3d& accel_raw);
+    bool det_init = false;          // detector EMAs initialized
+    bool is_stationary = false;     // hysteresis state of the detector
+    bool adapting = false;          // dwell satisfied, bias being updated
+    int  stationary_samples = 0;    // consecutive stationary samples
+    // Fast-EMA statistics for the stationarity detector (mean and mean of
+    // squares per axis; variance = E[x^2] - E[x]^2).
+    Eigen::Vector3d gyro_det_mean    = Eigen::Vector3d::Zero();
+    Eigen::Vector3d gyro_det_meansq  = Eigen::Vector3d::Zero();
+    Eigen::Vector3d accel_det_mean   = Eigen::Vector3d::Zero();
+    Eigen::Vector3d accel_det_meansq = Eigen::Vector3d::Zero();
 };
 
 #endif

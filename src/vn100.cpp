@@ -75,6 +75,8 @@ void vn100::load_config(const std::string& config_path) {
     calib_warmup_sec = 1.0;
     calib_gyro_motion_thresh = 0.02;
     calib_accel_motion_thresh = 0.30;
+    calib_adaptive = true;
+    calib_adaptive_tau = 5.0;
 
     bool config_loaded = false;
 
@@ -132,6 +134,10 @@ void vn100::load_config(const std::string& config_path) {
                         calib_gyro_motion_thresh = std::stod(val);
                     } else if (key == "IMU.calib_accel_motion_thresh") {
                         calib_accel_motion_thresh = std::stod(val);
+                    } else if (key == "IMU.calib_adaptive") {
+                        calib_adaptive = (std::stoi(val) != 0);
+                    } else if (key == "IMU.calib_adaptive_tau") {
+                        calib_adaptive_tau = std::stod(val);
                     }
                 } catch (const std::exception& e) {
                     std::cerr << "Error parsing config line: " << line << " - " << e.what() << std::endl;
@@ -166,6 +172,8 @@ void vn100::load_config(const std::string& config_path) {
               << ", Publish Filtered: " << (publish_filtered_imu ? filtered_imu_topic : "no")
               << ", Bias Calib: " << (calibrate_bias ? "enabled" : "disabled")
               << " [warmup=" << calib_warmup_sec << "s duration=" << calib_duration_sec << "s]"
+              << ", Adaptive Bias: " << (calib_adaptive ? "enabled" : "disabled")
+              << " [tau=" << calib_adaptive_tau << "s]"
               << std::endl;
 
     if (config_loaded) {
@@ -198,6 +206,11 @@ void vn100::open(const std::string& p, int b) {
     gyro_sumsq.setZero(); accel_sumsq.setZero();
     gyro_bias.setZero();  accel_bias.setZero();
     calib_count = 0;
+    // Initialize adaptive bias tracking state
+    det_init = false;
+    is_stationary = false;
+    adapting = false;
+    stationary_samples = 0;
     if (calibrate_bias) {
         calib_warmup_samples = std::max(0,   static_cast<int>(calib_warmup_sec   * frequency));
         calib_target_samples = std::max(1,   static_cast<int>(calib_duration_sec * frequency));
@@ -415,6 +428,14 @@ void vn100::parse_vn100_packet(void* userData, Packet& p, size_t index) {
         // bias is zero until calibration completes (robot is stationary anyway)
     }
 
+    // ---- Continuous adaptive bias tracking (zero-velocity update) ----
+    // Runs on the raw readings, before bias removal. Once the startup
+    // estimate exists, re-estimate the bias whenever the IMU is stationary
+    // so temperature / in-run drift is tracked instead of frozen.
+    if (self->calib_state == CalibState::Done && self->calib_adaptive) {
+        self->update_adaptive_bias(W_i, a_i);
+    }
+
     // Remove estimated bias so published values are zero-mean at rest.
     W_i -= self->gyro_bias;
     a_i -= self->accel_bias;
@@ -538,6 +559,81 @@ void vn100::parse_vn100_packet(void* userData, Packet& p, size_t index) {
         first_print = false;
         packet_count = 0;
         start_time = current_time;
+    }
+}
+
+void vn100::update_adaptive_bias(const Vector3d& gyro_raw, const Vector3d& accel_raw) {
+    const double dt = 1.0 / static_cast<double>(frequency);
+
+    // Stationarity detector: fast EMA (~0.5 s window) of x and x^2 per axis,
+    // variance = E[x^2] - E[x]^2. Cheap O(1) sliding variance estimate.
+    const double a_fast = dt / (0.5 + dt);
+
+    if (!det_init) {
+        gyro_det_mean    = gyro_raw;
+        gyro_det_meansq  = gyro_raw.cwiseProduct(gyro_raw);
+        accel_det_mean   = accel_raw;
+        accel_det_meansq = accel_raw.cwiseProduct(accel_raw);
+        det_init = true;
+        return;
+    }
+
+    gyro_det_mean    += a_fast * (gyro_raw - gyro_det_mean);
+    gyro_det_meansq  += a_fast * (gyro_raw.cwiseProduct(gyro_raw) - gyro_det_meansq);
+    accel_det_mean   += a_fast * (accel_raw - accel_det_mean);
+    accel_det_meansq += a_fast * (accel_raw.cwiseProduct(accel_raw) - accel_det_meansq);
+
+    Vector3d gyro_var =
+        (gyro_det_meansq - gyro_det_mean.cwiseProduct(gyro_det_mean)).cwiseMax(0.0);
+    Vector3d accel_var =
+        (accel_det_meansq - accel_det_mean.cwiseProduct(accel_det_mean)).cwiseMax(0.0);
+    const double gyro_std_max  = gyro_var.cwiseSqrt().maxCoeff();
+    const double accel_std_max = accel_var.cwiseSqrt().maxCoeff();
+
+    // Hysteresis: strict threshold to enter "stationary", looser to leave, so
+    // the detector does not chatter near the threshold.
+    bool stationary_now;
+    if (is_stationary) {
+        stationary_now = (gyro_std_max  < 1.5 * calib_gyro_motion_thresh) &&
+                         (accel_std_max < 1.5 * calib_accel_motion_thresh);
+    } else {
+        stationary_now = (gyro_std_max  < calib_gyro_motion_thresh) &&
+                         (accel_std_max < calib_accel_motion_thresh);
+    }
+
+    const int dwell_samples = std::max(1, static_cast<int>(0.25 * frequency));
+
+    if (stationary_now) {
+        stationary_samples++;
+        is_stationary = true;
+
+        // Require a short dwell of consecutive stationary samples before
+        // adapting, so a brief pause inside a motion is not mistaken for rest.
+        if (stationary_samples >= dwell_samples) {
+            // At rest the true signal is zero (gyro) and zero (gravity-
+            // compensated linear accel), so the raw reading IS bias + noise.
+            // Slow EMA pulls the bias toward the current true bias.
+            const double alpha = dt / (calib_adaptive_tau + dt);
+            gyro_bias  += alpha * (gyro_raw - gyro_bias);
+            accel_bias += alpha * (accel_raw - accel_bias);
+
+            if (!adapting) {
+                adapting = true;
+                std::cout << "\nIMU: stationary detected - adaptive bias tracking active."
+                          << std::endl;
+            }
+        }
+    } else {
+        if (adapting) {
+            std::cout << std::fixed << std::setprecision(6)
+                      << "\nIMU: motion detected - bias frozen at"
+                      << "  gyro [" << gyro_bias(0) << " " << gyro_bias(1) << " " << gyro_bias(2) << "]"
+                      << "  accel [" << accel_bias(0) << " " << accel_bias(1) << " " << accel_bias(2) << "]"
+                      << std::endl;
+        }
+        is_stationary = false;
+        adapting = false;
+        stationary_samples = 0;
     }
 }
 
