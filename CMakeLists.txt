@@ -8,6 +8,18 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(Eigen3 REQUIRED)
 
 set(PYBIND11_FINDPYTHON ON)
+find_package(Python COMPONENTS Interpreter Development REQUIRED)
+# Prefer the pybind11 that ships with the active interpreter. The system
+# pybind11 (2.9) predates Python 3.11 making PyFrameObject opaque and fails
+# to compile against newer headers.
+execute_process(
+    COMMAND ${Python_EXECUTABLE} -m pybind11 --cmakedir
+    OUTPUT_VARIABLE PYBIND11_CMAKE_DIR
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_QUIET)
+if(PYBIND11_CMAKE_DIR)
+    set(pybind11_DIR "${PYBIND11_CMAKE_DIR}" CACHE PATH "pybind11 cmake dir" FORCE)
+endif()
 find_package(pybind11 REQUIRED)
 
 list(APPEND CMAKE_PREFIX_PATH "/usr/local")
